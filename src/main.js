@@ -1,0 +1,746 @@
+// À portée de vélo: how far can you cycle in France from a starting point, at a chosen average speed.
+// UI and interactions follow tram.camilleroux.com; the network distances come from Valhalla (see routing.js).
+
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+import "./styles.css";
+import { navyStyle, labelLayers, NAVY } from "./basemap.js";
+import { BANDS, RoutingError, isodistances, route } from "./routing.js";
+import { searchAddress, placeName } from "./geocode.js";
+import { PALETTE, buildField, contour, fieldCorners, fieldLngLatBounds, fieldStats, paintHeat, paletteColor } from "./field.js";
+
+const DEFAULT_FROM = { lat: 48.85661, lon: 2.35222, label: "Hôtel de Ville, Paris" };
+const DEFAULT_SPEED = 18;
+const DEFAULT_MAX = 60;
+const DEFAULT_ISOCHRONES = [30, 60];
+const ISOCHRONE_OPTIONS = [15, 30, 60, 90];
+const BIKES = ["Hybrid", "Road", "Mountain"];
+const REACH_MINUTES = 30;
+const FRANCE_VIEW = [
+  [-5.2, 41.3],
+  [9.6, 51.1],
+];
+// Bicycles are not allowed on motorways; everything else in the tiles can be part of a ride.
+const RIDEABLE = ["trunk", "primary", "secondary", "tertiary", "minor", "service", "track", "path"];
+const BLANK_IMAGE =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+const $ = (id) => document.getElementById(id);
+const number = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 });
+const integer = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
+
+const state = {
+  from: null, // { lat, lon, label }
+  to: null, // { lat, lon, label }
+  speed: DEFAULT_SPEED,
+  maxMinutes: DEFAULT_MAX,
+  isochrones: [...DEFAULT_ISOCHRONES],
+  bike: "Hybrid",
+  mode: "heat",
+  heatFrom: "from", // the heatmap starts from the departure or from the arrival
+  field: null,
+  fieldKey: null,
+  bands: null,
+  trip: null, // { km, coordinates, roads }
+  france: null,
+  fitted: false,
+  ready: false, // overlay sources and layers added
+};
+
+// --- Small helpers --------------------------------------------------------------
+
+function formatMinutes(minutes) {
+  if (!Number.isFinite(minutes)) return "—";
+  if (minutes < 1) return "< 1 min";
+  if (minutes < 60) return `${Math.round(minutes)} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes - hours * 60);
+  return rest === 60 ? `${hours + 1} h 00` : `${hours} h ${String(rest).padStart(2, "0")}`;
+}
+
+const formatKm = (km) => `${km < 10 ? number.format(km) : integer.format(km)} km`;
+const minutesFor = (km) => (km / state.speed) * 60;
+const coordsLabel = ({ lat, lon }) => `${number.format(lat)}° N, ${number.format(lon)}° E`;
+
+function toast(message) {
+  const element = $("toast");
+  element.textContent = message;
+  element.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => {
+    element.hidden = true;
+  }, 2600);
+}
+
+function pointInRing([x, y], ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function inFrance({ lat, lon }) {
+  if (!state.france) return true;
+  return state.france.geometry.coordinates.some((polygon) => pointInRing([lon, lat], polygon[0]));
+}
+
+// --- Map ------------------------------------------------------------------------
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: navyStyle(),
+  bounds: FRANCE_VIEW,
+  minZoom: 4,
+  maxZoom: 17,
+  maxBounds: [
+    [-14, 36],
+    [20, 56],
+  ],
+  attributionControl: false,
+  dragRotate: false,
+  pitchWithRotate: false,
+});
+map.touchZoomRotate.disableRotation();
+map.keyboard.disableRotation();
+map.addControl(
+  new maplibregl.AttributionControl({
+    compact: true,
+    customAttribution:
+      '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://openfreemap.org">OpenFreeMap</a> · <a href="https://github.com/valhalla/valhalla">Valhalla</a>',
+  }),
+  "bottom-right",
+);
+
+const emptyCollection = { type: "FeatureCollection", features: [] };
+
+function addOverlayLayers() {
+  map.addSource("heat", {
+    type: "image",
+    url: BLANK_IMAGE,
+    coordinates: [
+      [0, 0.001],
+      [0.001, 0.001],
+      [0.001, 0],
+      [0, 0],
+    ],
+  });
+  map.addLayer({
+    id: "heat",
+    type: "raster",
+    source: "heat",
+    paint: { "raster-resampling": "linear", "raster-fade-duration": 0, "raster-opacity": 1 },
+  }, "water"); // water and roads stay drawn over the colours, as on the original map
+
+  // Everything outside metropolitan France is dimmed: the map only promises France for now.
+  const world = [
+    [-180, -85],
+    [180, -85],
+    [180, 85],
+    [-180, 85],
+    [-180, -85],
+  ];
+  const holes = state.france ? state.france.geometry.coordinates.map((polygon) => polygon[0]) : [];
+  map.addSource("france-mask", {
+    type: "geojson",
+    data: { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [world, ...holes] } },
+  });
+  map.addLayer({ id: "france-mask", type: "fill", source: "france-mask", paint: { "fill-color": "#040a18", "fill-opacity": 0.55 } });
+  if (state.france) {
+    map.addSource("france", { type: "geojson", data: state.france });
+    map.addLayer({
+      id: "france-outline",
+      type: "line",
+      source: "france",
+      paint: { "line-color": NAVY.boundary, "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.8, 10, 1.6] },
+    });
+  }
+
+  map.addSource("contours", { type: "geojson", data: emptyCollection });
+  map.addLayer({
+    id: "contour-halo",
+    type: "line",
+    source: "contours",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "rgba(255,255,255,0.75)", "line-width": 4.5 },
+  });
+  map.addLayer({
+    id: "contour",
+    type: "line",
+    source: "contours",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#071022", "line-width": ["case", [">=", ["get", "minutes"], 60], 2, 1.4] },
+  });
+
+  map.addSource("trip", { type: "geojson", data: emptyCollection });
+  map.addLayer({
+    id: "trip-casing",
+    type: "line",
+    source: "trip",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#071022", "line-width": 7 },
+  });
+  map.addLayer({
+    id: "trip",
+    type: "line",
+    source: "trip",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#ffffff", "line-width": 3.5 },
+  });
+
+  for (const layer of labelLayers()) map.addLayer(layer);
+}
+
+/** "Routes" view: one copy of the road layer per distance band, kept to the roads inside that band. */
+function rebuildBandLayers() {
+  for (let k = 0; k < BANDS * 2; k += 1) if (map.getLayer(`band-${k}`)) map.removeLayer(`band-${k}`);
+  if (!state.bands) return;
+  // Outer bands first; inner ones are drawn on top and take over the roads they contain.
+  for (let k = state.bands.length - 1; k >= 0; k -= 1) {
+    map.addLayer(
+      {
+        id: `band-${k}`,
+        type: "line",
+        source: "openmaptiles",
+        "source-layer": "transportation",
+        filter: ["all", ["in", ["get", "class"], ["literal", RIDEABLE]], ["within", state.bands[k].geometry]],
+        layout: { "line-cap": "round", "line-join": "round", visibility: state.mode === "routes" ? "visible" : "none" },
+        paint: {
+          "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.9, 10, 1.4, 14, 3.2, 17, 6],
+          "line-color": "#fff",
+        },
+      },
+      "france-mask",
+    );
+  }
+}
+
+// --- Markers --------------------------------------------------------------------
+
+function markerElement(kind) {
+  const element = document.createElement("div");
+  element.className = `marker marker-${kind}`;
+  const label = document.createElement("span");
+  label.className = "marker-label";
+  element.append(label);
+  return element;
+}
+
+const fromMarker = new maplibregl.Marker({ element: markerElement("from"), draggable: true });
+const toMarker = new maplibregl.Marker({ element: markerElement("to"), draggable: true });
+fromMarker.getElement().querySelector(".marker-label").textContent = "Départ";
+fromMarker.on("dragend", () => {
+  const { lng, lat } = fromMarker.getLngLat();
+  setFrom({ lat, lon: lng });
+});
+toMarker.on("dragend", () => {
+  const { lng, lat } = toMarker.getLngLat();
+  setTo({ lat, lon: lng });
+});
+
+let contourLabels = [];
+
+// --- Computing and drawing --------------------------------------------------------
+
+const neededKm = () => (state.speed * state.maxMinutes) / 60;
+const heatSource = () => (state.heatFrom === "to" && state.to ? state.to : state.from);
+let computeController = null;
+let computeTimer = null;
+
+function scheduleCompute(delay = 0) {
+  clearTimeout(computeTimer);
+  computeTimer = setTimeout(compute, delay);
+}
+
+async function compute() {
+  const source = heatSource();
+  if (!source) return;
+  const key = `${source.lat.toFixed(5)},${source.lon.toFixed(5)},${state.bike}`;
+  const need = neededKm();
+  const field = state.field;
+  // A field computed further than needed still works (it is cropped by the colour scale), as long as
+  // it is not so much bigger that the grid becomes coarse.
+  if (field && state.fieldKey === key && field.maxKm >= need * 0.98 && field.maxKm <= need * 1.8) return;
+
+  computeController?.abort();
+  const controller = new AbortController();
+  computeController = controller;
+  $("loading").hidden = false;
+  try {
+    const bands = await isodistances(source, need, { bike: state.bike, speed: state.speed }, controller.signal);
+    if (!bands.length) throw new RoutingError("Aucune route cyclable près de ce point.");
+    state.bands = bands;
+    state.field = buildField(source, bands);
+    state.fieldKey = key;
+    showError(null);
+    rebuildBandLayers();
+    if (!state.fitted) {
+      state.fitted = true;
+      fitToField(false);
+    }
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    showError(error.message);
+  } finally {
+    if (computeController === controller) {
+      computeController = null;
+      $("loading").hidden = true;
+    }
+  }
+  redraw();
+}
+
+function showError(message) {
+  $("tripError").hidden = !message;
+  $("tripError").textContent = message ?? "";
+}
+
+/** Everything that depends on speed, scale or isochrones but needs no new routing. */
+function redraw() {
+  updateLegend();
+  updatePanel();
+  const { field } = state;
+  if (!field || !state.ready) return;
+
+  map.getSource("heat").updateImage({
+    url: paintHeat(field, { speed: state.speed, maxMinutes: state.maxMinutes }),
+    coordinates: fieldCorners(field),
+  });
+
+  state.bands?.forEach((band, k) => {
+    if (!map.getLayer(`band-${k}`)) return;
+    const near = k ? state.bands[k - 1].km : 0;
+    const t = minutesFor((near + band.km) / 2) / state.maxMinutes;
+    const [r, g, b] = paletteColor(Math.min(t, 1));
+    map.setPaintProperty(`band-${k}`, "line-color", `rgb(${r}, ${g}, ${b})`);
+    map.setPaintProperty(`band-${k}`, "line-opacity", t <= 1 ? 1 : 0);
+  });
+
+  const features = [];
+  for (const label of contourLabels) label.remove();
+  contourLabels = [];
+  for (const minutes of [...state.isochrones].sort((a, b) => a - b)) {
+    if (minutes > state.maxMinutes) continue;
+    const km = (state.speed * minutes) / 60;
+    if (km > field.maxKm * 1.001) continue;
+    const { segments, label } = contour(field, km);
+    if (!segments.length) continue;
+    features.push({ type: "Feature", properties: { minutes }, geometry: { type: "MultiLineString", coordinates: segments } });
+    if (label) {
+      const element = document.createElement("div");
+      element.className = "contour-label";
+      element.textContent = `${minutes} min`;
+      contourLabels.push(new maplibregl.Marker({ element, anchor: "center" }).setLngLat(label).addTo(map));
+    }
+  }
+  map.getSource("contours").setData({ type: "FeatureCollection", features });
+}
+
+function setMode(mode) {
+  state.mode = mode === "routes" ? "routes" : "heat";
+  for (const button of document.querySelectorAll(".map-mode button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.mode === state.mode));
+  }
+  for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
+  if (state.ready) {
+    map.setLayoutProperty("heat", "visibility", state.mode === "heat" ? "visible" : "none");
+    for (let k = 0; k < BANDS; k += 1) {
+      if (map.getLayer(`band-${k}`)) map.setLayoutProperty(`band-${k}`, "visibility", state.mode === "routes" ? "visible" : "none");
+    }
+  }
+  syncUrl();
+}
+
+function fitToField(animate = true) {
+  if (!state.field) return;
+  const wide = map.getContainer().clientWidth > 720;
+  map.fitBounds(fieldLngLatBounds(state.field), {
+    padding: { top: 40, bottom: 40, left: wide ? 320 : 30, right: wide ? 70 : 30 },
+    animate,
+    maxZoom: 14,
+  });
+}
+
+// --- Departure, arrival and the panel ----------------------------------------------
+
+async function nameOf(place) {
+  const name = await placeName(place);
+  if (name) place.label = name;
+  else place.label ??= coordsLabel(place);
+  updatePanel();
+}
+
+function setFrom(point, label = null, { quiet = false } = {}) {
+  if (!inFrance(point)) {
+    toast("La carte couvre la France métropolitaine et la Corse pour l'instant.");
+    if (state.from) fromMarker.setLngLat([state.from.lon, state.from.lat]);
+    return false;
+  }
+  state.from = { lat: point.lat, lon: point.lon, label };
+  fromMarker.setLngLat([point.lon, point.lat]).addTo(map);
+  if (!label) {
+    state.from.label = "Recherche du lieu…";
+    nameOf(state.from);
+  }
+  if (state.heatFrom === "from") scheduleCompute();
+  if (state.to) fetchTrip();
+  updatePanel();
+  if (!quiet) syncUrl();
+  return true;
+}
+
+function setTo(point, label = null, { quiet = false } = {}) {
+  if (!inFrance(point)) {
+    toast("La carte couvre la France métropolitaine et la Corse pour l'instant.");
+    if (state.to) toMarker.setLngLat([state.to.lon, state.to.lat]);
+    return false;
+  }
+  state.to = { lat: point.lat, lon: point.lon, label };
+  toMarker.setLngLat([point.lon, point.lat]).addTo(map);
+  if (!label) {
+    state.to.label = "Recherche du lieu…";
+    nameOf(state.to);
+  }
+  if (state.heatFrom === "to") scheduleCompute();
+  fetchTrip();
+  if (!quiet) syncUrl();
+  return true;
+}
+
+function removeTo() {
+  state.to = null;
+  state.trip = null;
+  toMarker.remove();
+  map.getSource("trip")?.setData(emptyCollection);
+  setHeatFrom("from");
+  updatePanel();
+  syncUrl();
+}
+
+function setHeatFrom(source) {
+  state.heatFrom = source === "to" && state.to ? "to" : "from";
+  for (const button of $("heatFrom").querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.source === state.heatFrom));
+  }
+  scheduleCompute();
+  syncUrl();
+}
+
+let tripController = null;
+
+async function fetchTrip() {
+  tripController?.abort();
+  if (!state.from || !state.to) return;
+  const controller = new AbortController();
+  tripController = controller;
+  state.trip = null;
+  updatePanel();
+  try {
+    state.trip = await route(state.from, state.to, { bike: state.bike, speed: state.speed }, controller.signal);
+    showError(null);
+    map.getSource("trip")?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: state.trip.coordinates } });
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    map.getSource("trip")?.setData(emptyCollection);
+    showError(error.message);
+  }
+  updatePanel();
+}
+
+function updatePanel() {
+  $("tripFrom").textContent = state.from?.label ?? "—";
+  const result = $("tripResult");
+  const toLabel = toMarker.getElement().querySelector(".marker-label");
+  if (!state.to) {
+    result.hidden = true;
+    $("tripHint").hidden = false;
+  } else {
+    result.hidden = false;
+    $("tripHint").hidden = true;
+    $("tripTo").textContent = state.to.label ?? "";
+    const trip = state.trip;
+    const duration = trip ? formatMinutes(minutesFor(trip.km)) : "…";
+    $("tripDuration").textContent = duration;
+    $("tripDistance").textContent = trip ? `${formatKm(trip.km)} à ${state.speed} km/h de moyenne` : "Calcul de l'itinéraire…";
+    toLabel.textContent = state.heatFrom === "to" ? `Arrivée · ${duration}` : duration;
+    $("tripSteps").replaceChildren(
+      ...(trip?.roads ?? []).map((road) => {
+        const item = document.createElement("li");
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        if (/piste|voie verte|cyclable|véloroute|eurovelo/i.test(road.name)) badge.classList.add("cycleway");
+        badge.textContent = formatKm(road.km);
+        const text = document.createElement("span");
+        text.textContent = road.name;
+        const minutes = document.createElement("span");
+        minutes.className = "minutes";
+        minutes.textContent = formatMinutes(minutesFor(road.km));
+        item.append(badge, text, minutes);
+        return item;
+      }),
+    );
+  }
+  updateReach();
+}
+
+function updateReach() {
+  const { field } = state;
+  if (!field) {
+    $("reach").textContent = "";
+    return;
+  }
+  const reachMinutes = Math.min(REACH_MINUTES, state.maxMinutes);
+  const stats = fieldStats(field, { speed: state.speed, maxMinutes: state.maxMinutes, reachMinutes });
+  const where = state.heatFrom === "to" && state.to ? "de cette arrivée" : "de ce départ";
+  $("reach").textContent = `Environ ${integer.format(stats.reachArea)} km² sont à moins de ${reachMinutes} minutes ${where}, à ${state.speed} km/h${
+    stats.complete ? "." : " (calcul en cours pour la nouvelle échelle)."
+  }`;
+  const set = (key, value, label) => {
+    document.querySelector(`[data-stat="${key}"]`).textContent = value;
+    if (label) document.querySelector(`[data-stat-label="${key}"]`).textContent = label;
+  };
+  set("area30", `${integer.format(stats.reachArea)} km²`, `accessibles en moins de ${reachMinutes} min`);
+  set("areaMax", `${integer.format(stats.maxArea)} km²`, `accessibles en moins de ${formatMinutes(state.maxMinutes)}, l'échelle choisie`);
+  set("farthest", formatKm(stats.farthest), `à vol d'oiseau : le point le plus éloigné atteint en ${formatMinutes(state.maxMinutes)}`);
+  set("detour", stats.detour ? `+${integer.format((stats.detour - 1) * 100)} %` : "—", "de distance en plus en moyenne par la route, par rapport à la ligne droite");
+}
+
+function updateLegend() {
+  const stops = PALETTE.map(([t, [r, g, b]]) => `rgb(${r}, ${g}, ${b}) ${Math.round(t * 100)}%`);
+  $("legendBar").style.background = `linear-gradient(90deg, ${stops.join(", ")})`;
+  $("legendMid").textContent = formatMinutes(state.maxMinutes / 2);
+  $("legendMax").textContent = formatMinutes(state.maxMinutes);
+  $("legendMidKm").textContent = formatKm(neededKm() / 2);
+  $("legendMaxKm").textContent = formatKm(neededKm());
+  $("maxValue").textContent = formatMinutes(state.maxMinutes);
+  $("speedValue").textContent = `${state.speed} km/h`;
+}
+
+// --- URL ------------------------------------------------------------------------------
+
+const formatPair = ({ lat, lon }) => `${lat.toFixed(5)},${lon.toFixed(5)}`;
+
+function parsePair(value) {
+  const match = /^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(value || "");
+  return match ? { lat: Number(match[1]), lon: Number(match[2]) } : null;
+}
+
+function syncUrl() {
+  const params = new URLSearchParams(location.search);
+  for (const key of ["from", "to", "carte", "vitesse", "max", "iso", "velo", "vue"]) params.delete(key);
+  if (state.from) params.set("from", formatPair(state.from));
+  if (state.to) params.set("to", formatPair(state.to));
+  if (state.to && state.heatFrom === "to") params.set("carte", "arrivee");
+  if (state.speed !== DEFAULT_SPEED) params.set("vitesse", String(state.speed));
+  if (state.maxMinutes !== DEFAULT_MAX) params.set("max", String(state.maxMinutes));
+  const iso = [...state.isochrones].sort((a, b) => a - b).join(",");
+  if (iso !== DEFAULT_ISOCHRONES.join(",")) params.set("iso", iso || "0");
+  if (state.bike !== "Hybrid") params.set("velo", state.bike);
+  if (state.mode !== "heat") params.set("vue", state.mode);
+  const query = params.toString().replaceAll("%2C", ",");
+  history.replaceState(null, "", query ? `?${query}` : location.pathname);
+}
+
+function restoreFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const speed = Number(params.get("vitesse"));
+  if (speed >= 8 && speed <= 40) state.speed = Math.round(speed);
+  const max = Number(params.get("max"));
+  if (max >= 15 && max <= 120) state.maxMinutes = Math.round(max / 5) * 5;
+  if (params.has("iso")) {
+    state.isochrones = params
+      .get("iso")
+      .split(",")
+      .map(Number)
+      .filter((value) => ISOCHRONE_OPTIONS.includes(value));
+  }
+  if (BIKES.includes(params.get("velo"))) state.bike = params.get("velo");
+  $("speedRange").value = String(state.speed);
+  $("maxRange").value = String(state.maxMinutes);
+  for (const input of $("isoToggles").querySelectorAll("input")) input.checked = state.isochrones.includes(Number(input.value));
+  for (const input of $("bikeToggles").querySelectorAll("input")) input.checked = input.value === state.bike;
+  setMode(params.get("vue"));
+
+  const from = parsePair(params.get("from"));
+  if (!from || !setFrom(from, null, { quiet: true })) setFrom(DEFAULT_FROM, DEFAULT_FROM.label, { quiet: true });
+  const to = parsePair(params.get("to"));
+  if (to && setTo(to, null, { quiet: true }) && params.get("carte") === "arrivee") setHeatFrom("to");
+  map.jumpTo({ center: [state.from.lon, state.from.lat], zoom: 9 });
+}
+
+// --- Address search ------------------------------------------------------------------
+
+let searchController = null;
+let searchTimer = null;
+
+function showResults(results) {
+  const list = $("searchResults");
+  list.replaceChildren(
+    ...results.map((result) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = result.label;
+      if (result.context) {
+        const context = document.createElement("small");
+        context.textContent = result.context;
+        button.append(context);
+      }
+      button.addEventListener("click", () => chooseResult(result));
+      item.append(button);
+      return item;
+    }),
+  );
+  list.hidden = !results.length;
+}
+
+function chooseResult(result) {
+  $("searchResults").hidden = true;
+  $("searchInput").value = result.label;
+  if (setFrom({ lat: result.lat, lon: result.lon }, result.label)) {
+    state.fitted = false;
+    map.flyTo({ center: [result.lon, result.lat], zoom: Math.max(map.getZoom(), 9) });
+    syncUrl();
+  }
+}
+
+async function runSearch(query, { pickFirst = false } = {}) {
+  searchController?.abort();
+  if (query.trim().length < 3) {
+    showResults([]);
+    return;
+  }
+  const controller = new AbortController();
+  searchController = controller;
+  try {
+    const results = await searchAddress(query, controller.signal);
+    if (pickFirst && results.length) chooseResult(results[0]);
+    else if (pickFirst) toast("Aucune adresse trouvée en France.");
+    else showResults(results);
+  } catch (error) {
+    if (error.name !== "AbortError") toast(error.message);
+  }
+}
+
+$("searchInput").addEventListener("input", (event) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(event.target.value), 250);
+});
+$("searchForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  clearTimeout(searchTimer);
+  runSearch($("searchInput").value, { pickFirst: true });
+});
+document.addEventListener("click", (event) => {
+  if (!$("searchForm").contains(event.target)) $("searchResults").hidden = true;
+});
+
+// --- Controls --------------------------------------------------------------------------
+
+$("speedRange").addEventListener("input", (event) => {
+  state.speed = Number(event.target.value);
+  redraw();
+  scheduleCompute(450);
+  syncUrl();
+});
+$("maxRange").addEventListener("input", (event) => {
+  state.maxMinutes = Number(event.target.value);
+  redraw();
+  scheduleCompute(450);
+  syncUrl();
+});
+$("isoToggles").addEventListener("change", () => {
+  state.isochrones = [...$("isoToggles").querySelectorAll("input:checked")].map((input) => Number(input.value));
+  redraw();
+  syncUrl();
+});
+$("bikeToggles").addEventListener("change", (event) => {
+  state.bike = event.target.value;
+  scheduleCompute();
+  if (state.to) fetchTrip();
+  syncUrl();
+});
+$("modeToggles").addEventListener("change", (event) => setMode(event.target.value));
+for (const button of document.querySelectorAll(".map-mode button")) {
+  button.addEventListener("click", () => setMode(button.dataset.mode));
+}
+for (const button of $("heatFrom").querySelectorAll("button")) {
+  button.addEventListener("click", () => setHeatFrom(button.dataset.source));
+}
+$("removeTo").addEventListener("click", removeTo);
+
+$("swap").addEventListener("click", () => {
+  if (!state.to) {
+    toast("Posez d'abord une arrivée en cliquant sur la carte.");
+    return;
+  }
+  const [from, to] = [state.to, state.from];
+  setFrom(from, from.label, { quiet: true });
+  setTo(to, to.label);
+});
+
+$("locate").addEventListener("click", () => {
+  if (!navigator.geolocation) {
+    toast("La géolocalisation n'est pas disponible dans ce navigateur.");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    ({ coords }) => {
+      if (setFrom({ lat: coords.latitude, lon: coords.longitude })) {
+        state.fitted = false;
+        map.flyTo({ center: [coords.longitude, coords.latitude], zoom: 10 });
+      }
+    },
+    () => toast("Position introuvable. Autorisez la localisation ou cherchez une adresse."),
+    { enableHighAccuracy: false, timeout: 10000 },
+  );
+});
+
+$("share").addEventListener("click", async () => {
+  syncUrl();
+  try {
+    if (navigator.share && matchMedia("(pointer: coarse)").matches) {
+      await navigator.share({ title: document.title, url: location.href });
+      return;
+    }
+    await navigator.clipboard.writeText(location.href);
+    toast("Lien copié");
+  } catch (error) {
+    if (error.name !== "AbortError") toast("Copiez l'adresse de la page pour partager cette carte.");
+  }
+});
+
+$("zoomIn").addEventListener("click", () => map.zoomIn());
+$("zoomOut").addEventListener("click", () => map.zoomOut());
+$("recenter").addEventListener("click", () => fitToField());
+$("fullscreen").addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $("mapStage").requestFullscreen?.();
+});
+document.addEventListener("fullscreenchange", () => map.resize());
+
+map.on("click", (event) => setTo({ lat: event.lngLat.lat, lon: event.lngLat.lng }));
+
+// --- Start ------------------------------------------------------------------------------
+
+async function init() {
+  updateLegend();
+  try {
+    const response = await fetch(`${import.meta.env.BASE_URL}france.geojson`);
+    state.france = await response.json();
+  } catch {
+    state.france = null;
+  }
+  // "style.load" rather than "load": the overlays must not wait for basemap tiles, which may be slow.
+  const start = () => {
+    addOverlayLayers();
+    state.ready = true;
+    restoreFromUrl();
+  };
+  if (map.style?._loaded) start();
+  else map.once("style.load", start);
+}
+
+init();
