@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>À portée de vélo · Jusqu'où aller à vélo en France</title>
+    <meta
+      name="description"
+      content="Carte interactive des temps de trajet à vélo en France : choisissez un départ et une vitesse moyenne, la carte se colore selon le temps qu'il faut pour aller partout."
+    />
+    <meta name="theme-color" content="#0b1730" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="./">
+          <img src="favicon.svg" width="22" height="22" alt="" />
+          À portée de vélo
+        </a>
+        <nav class="topbar-links">
+          <a class="topbar-link" href="#faq-title">Comment ça marche</a>
+          <a class="topbar-link" href="https://github.com/ArtB92/isoride">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <h1>La France à portée de vélo</h1>
+        <p class="lede">
+          Le pays redessiné par le temps qu'il faut pour y aller à vélo. Choisissez un départ et votre vitesse moyenne&nbsp;:
+          la carte se colore selon le temps de trajet vers chaque point, par les routes et les pistes cyclables.
+        </p>
+        <form id="searchForm" class="search" role="search" autocomplete="off">
+          <label class="visually-hidden" for="searchInput">Adresse de départ</label>
+          <input id="searchInput" type="search" placeholder="Partir d'une adresse… (ex. Gare de Lyon-Part-Dieu)" />
+          <button type="submit" class="button primary">Partir d'ici</button>
+          <ul id="searchResults" class="search-results" hidden></ul>
+        </form>
+        <ol class="steps" aria-label="Mode d'emploi">
+          <li><strong>1. Départ</strong> Cherchez une adresse ou glissez le point vert.</li>
+          <li><strong>2. Vitesse</strong> Réglez votre allure moyenne, de la balade à la sortie sportive.</li>
+          <li><strong>3. Lecture</strong> Vert = proche, rouge = loin. Une ligne par heure. Cliquez pour un itinéraire.</li>
+        </ol>
+      </section>
+
+      <section class="map-card" aria-label="Carte des temps de trajet à vélo">
+        <noscript>
+          <p class="noscript">Cette carte interactive a besoin de JavaScript pour calculer les temps de trajet. Activez-le pour l'utiliser.</p>
+        </noscript>
+        <div id="mapStage" class="map-stage">
+          <div id="map" class="map"></div>
+          <div id="loading" class="loading" hidden><span></span>Calcul des trajets…</div>
+
+          <aside id="tripPanel" class="trip-panel" aria-live="polite">
+            <p class="trip-eyebrow">Départ</p>
+            <p id="tripFrom" class="trip-from">Chargement de la carte…</p>
+            <div id="tripResult" class="trip-result" hidden>
+              <div class="trip-row">
+                <p class="trip-eyebrow">Arrivée</p>
+                <button id="removeTo" type="button" class="link-button">Retirer</button>
+              </div>
+              <p id="tripTo" class="trip-to"></p>
+              <p id="tripDuration" class="trip-duration"></p>
+              <p id="tripDistance" class="trip-distance"></p>
+              <ol id="tripSteps" class="trip-steps"></ol>
+              <div id="heatFrom" class="segmented" role="group" aria-label="Point d'où part la carte">
+                <span>Carte depuis</span>
+                <button type="button" data-source="from" aria-pressed="true">le départ</button>
+                <button type="button" data-source="to" aria-pressed="false">l'arrivée</button>
+              </div>
+            </div>
+            <p id="tripHint" class="trip-hint">Cliquez sur la carte pour poser une arrivée.</p>
+            <p id="tripError" class="trip-error" hidden></p>
+          </aside>
+
+          <div class="map-buttons">
+            <button id="zoomIn" type="button" class="icon-button" aria-label="Zoomer">+</button>
+            <button id="zoomOut" type="button" class="icon-button" aria-label="Dézoomer">−</button>
+            <button id="recenter" type="button" class="icon-button" aria-label="Recentrer la carte">⌖</button>
+            <button id="fullscreen" type="button" class="icon-button" aria-label="Plein écran">⤢</button>
+          </div>
+
+          <div class="map-mode segmented-pill" role="group" aria-label="Affichage">
+            <button type="button" data-mode="heat" aria-pressed="true">Chaleur</button>
+            <button type="button" data-mode="routes" aria-pressed="false">Routes</button>
+          </div>
+
+          <div class="legend" aria-hidden="true">
+            <div id="legendBar" class="legend-bar"></div>
+            <div class="legend-labels"><span>0</span><span id="legendMid"></span><span id="legendMax"></span></div>
+            <div class="legend-labels legend-km"><span>0</span><span id="legendMidKm"></span><span id="legendMaxKm"></span></div>
+          </div>
+        </div>
+
+        <div class="speed-control">
+          <label class="speed-label" for="speedRange">Vitesse moyenne</label>
+          <input id="speedRange" type="range" min="8" max="45" step="1" value="18" />
+          <output id="speedValue" class="speed-value" for="speedRange">18 km/h</output>
+        </div>
+        <div class="controls">
+          <div class="control-group">
+            <label class="control-label" for="maxRange">Échelle</label>
+            <input id="maxRange" type="range" min="15" max="360" step="15" value="360" />
+            <output id="maxValue" for="maxRange">6 h 00</output>
+          </div>
+          <div id="modeToggles" class="control-group">
+            <span class="control-label">Affichage</span>
+            <label class="pill-toggle"><input type="radio" name="mode" value="heat" checked /> Chaleur</label>
+            <label class="pill-toggle"><input type="radio" name="mode" value="routes" /> Routes seules</label>
+          </div>
+          <div class="control-group actions">
+            <button id="locate" type="button" class="button">Ma position</button>
+            <button id="swap" type="button" class="button">Inverser</button>
+            <button id="share" type="button" class="button primary">Partager</button>
+          </div>
+        </div>
+        <p id="reach" class="reach"></p>
+      </section>
+
+      <section class="section" aria-labelledby="stats-title">
+        <h2 id="stats-title">Ce départ en chiffres</h2>
+        <div id="statGrid" class="stat-grid">
+          <div class="stat"><strong data-stat="area30">—</strong><span data-stat-label="area30">accessibles en moins de 30 min</span></div>
+          <div class="stat"><strong data-stat="areaMax">—</strong><span data-stat-label="areaMax">accessibles dans l'échelle choisie</span></div>
+          <div class="stat"><strong data-stat="farthest">—</strong><span data-stat-label="farthest">à vol d'oiseau, le point le plus éloigné atteint</span></div>
+          <div class="stat"><strong data-stat="detour">—</strong><span data-stat-label="detour">de détour moyen par la route, par rapport à la ligne droite</span></div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="faq-title">
+        <h2 id="faq-title">Questions fréquentes</h2>
+        <details>
+          <summary>Comment le temps de trajet est-il calculé ?</summary>
+          <p>
+            Pour chaque point, on mesure la longueur du meilleur itinéraire cyclable depuis le départ, puis on la divise par la
+            vitesse moyenne choisie. À 18&nbsp;km/h, 9&nbsp;km de route font 30&nbsp;minutes. Changer la vitesse recolore la
+            carte immédiatement, puis le calcul est relancé pour couvrir la nouvelle portée.
+          </p>
+        </details>
+        <details>
+          <summary>Quelles routes sont prises en compte ?</summary>
+          <p>
+            Celles où un vélo a le droit de circuler dans OpenStreetMap&nbsp;: pistes et bandes cyclables, voies vertes, routes
+            et chemins, sans autoroutes ni voies rapides. L'itinéraire préfère les aménagements cyclables quand le détour est
+            raisonnable, et évite les chemins trop accidentés.
+          </p>
+        </details>
+        <details>
+          <summary>Que montre l'affichage «&nbsp;Routes seules&nbsp;» ?</summary>
+          <p>
+            Au lieu d'une nappe de couleur, chaque route et piste atteignable est colorée, mètre par mètre, selon le temps qu'il
+            faut pour la rejoindre. En zoomant, les petites rues et chemins apparaissent à leur tour.
+          </p>
+        </details>
+        <details>
+          <summary>Jusqu'où va la carte ?</summary>
+          <p>
+            Jusqu'à 6&nbsp;heures de selle, dans la limite de 200&nbsp;km de route fixée par le serveur d'itinéraires public.
+            Les grandes distances demandent quelques secondes de calcul.
+          </p>
+        </details>
+        <details>
+          <summary>Le relief, les feux et le vent comptent-ils ?</summary>
+          <p>
+            Non&nbsp;: la vitesse est une moyenne sur tout le trajet. Si vous roulez plus lentement en montagne, baissez-la. Le
+            choix de l'itinéraire tient compte des pentes, mais pas son temps.
+          </p>
+        </details>
+        <details>
+          <summary>D'où viennent les données ?</summary>
+          <p>
+            Réseau routier et cyclable&nbsp;: © contributeurs <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>,
+            calculs d'itinéraires par <a href="https://github.com/valhalla/valhalla">Valhalla</a> sur le serveur public de la
+            <a href="https://fossgis.de/">FOSSGIS</a>. Fond de carte&nbsp;: <a href="https://openfreemap.org/">OpenFreeMap</a>.
+            Recherche d'adresse&nbsp;: <a href="https://geoservices.ign.fr/">Géoplateforme IGN</a> (Base Adresse Nationale).
+            Contour de la France&nbsp;: Natural Earth.
+          </p>
+        </details>
+        <details>
+          <summary>Pourquoi seulement la France ?</summary>
+          <p>
+            Pour commencer. Le calcul fonctionne partout où OpenStreetMap a des routes, mais la recherche d'adresse et les
+            réglages sont pensés pour la France métropolitaine et la Corse.
+          </p>
+        </details>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>
+        Inspiré d'<a href="https://tram.camilleroux.com/">À portée de tram</a> de Camille Roux. Données © contributeurs
+        OpenStreetMap.
+      </p>
+    </footer>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
