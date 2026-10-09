@@ -5,6 +5,8 @@ export const VALHALLA_URL = (import.meta.env.VITE_VALHALLA_URL ?? "https://valha
 /** Number of nested isodistance polygons requested; the server allows 4 contours per request. */
 export const BANDS = 8;
 const CONTOURS_PER_REQUEST = 4;
+/** Longest isodistance the public server accepts (max_distance_contour), in km. */
+export const MAX_KM = 200;
 
 export class RoutingError extends Error {
   constructor(message, { status = 0, code = 0 } = {}) {
@@ -41,10 +43,10 @@ function describeError(code, status, raw) {
   return raw ? `Erreur du serveur d'itinéraires : ${raw}` : "Erreur du serveur d'itinéraires.";
 }
 
-function costingOptions(bike, speed) {
+function costingOptions(speed) {
   return {
     bicycle: {
-      bicycle_type: bike,
+      bicycle_type: "Hybrid",
       cycling_speed: speed,
       // Prefer cycleways and quiet roads, and avoid steep climbs when a reasonable alternative exists.
       use_roads: 0.3,
@@ -57,7 +59,7 @@ function costingOptions(bike, speed) {
  * Nested polygons of everything reachable within each distance (km) along the cycling network.
  * Returns [{ km, geometry }] sorted from nearest to farthest.
  */
-export async function isodistances({ lat, lon }, maxKm, { bike, speed }, signal) {
+export async function isodistances({ lat, lon }, maxKm, { speed }, signal) {
   const distances = Array.from({ length: BANDS }, (_, i) => Math.round(((maxKm * (i + 1)) / BANDS) * 1000) / 1000);
   const chunks = [];
   for (let i = 0; i < distances.length; i += CONTOURS_PER_REQUEST) chunks.push(distances.slice(i, i + CONTOURS_PER_REQUEST));
@@ -67,7 +69,7 @@ export async function isodistances({ lat, lon }, maxKm, { bike, speed }, signal)
       {
         locations: [{ lat, lon }],
         costing: "bicycle",
-        costing_options: costingOptions(bike, speed),
+        costing_options: costingOptions(speed),
         // Isodistance contours: the time then simply follows from the chosen average speed.
         contours: chunk.map((km) => (metric === "distance" ? { distance: km } : { time: (km / speed) * 60 })),
         polygons: true,
@@ -97,7 +99,7 @@ export async function isodistances({ lat, lon }, maxKm, { bike, speed }, signal)
 }
 
 /** Cycling route between two points: geometry, length (km) and the main roads it follows. */
-export async function route(from, to, { bike, speed }, signal) {
+export async function route(from, to, { speed }, signal) {
   const result = await call(
     "route",
     {
@@ -106,7 +108,7 @@ export async function route(from, to, { bike, speed }, signal) {
         { lat: to.lat, lon: to.lon },
       ],
       costing: "bicycle",
-      costing_options: costingOptions(bike, speed),
+      costing_options: costingOptions(speed),
       directions_options: { language: "fr-FR", units: "kilometers" },
     },
     signal,

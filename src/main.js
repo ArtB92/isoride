@@ -5,16 +5,16 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./styles.css";
 import { navyStyle, labelLayers, NAVY } from "./basemap.js";
-import { BANDS, RoutingError, isodistances, route } from "./routing.js";
+import { MAX_KM, RoutingError, isodistances, route } from "./routing.js";
 import { searchAddress, placeName } from "./geocode.js";
-import { PALETTE, buildField, contour, fieldCorners, fieldLngLatBounds, fieldStats, paintHeat, paletteColor } from "./field.js";
+import { PALETTE, buildField, contour, fieldCorners, fieldLngLatBounds, fieldStats, paintHeat } from "./field.js";
+import { reachRoads } from "./roads.js";
 
 const DEFAULT_FROM = { lat: 48.85661, lon: 2.35222, label: "Hôtel de Ville, Paris" };
 const DEFAULT_SPEED = 18;
-const DEFAULT_MAX = 60;
-const DEFAULT_ISOCHRONES = [30, 60];
-const ISOCHRONE_OPTIONS = [15, 30, 60, 90];
-const BIKES = ["Hybrid", "Road", "Mountain"];
+const DEFAULT_MAX = 360;
+const MIN_SPEED = 8;
+const MAX_SPEED = 45;
 const REACH_MINUTES = 30;
 const FRANCE_VIEW = [
   [-5.2, 41.3],
@@ -34,13 +34,10 @@ const state = {
   to: null, // { lat, lon, label }
   speed: DEFAULT_SPEED,
   maxMinutes: DEFAULT_MAX,
-  isochrones: [...DEFAULT_ISOCHRONES],
-  bike: "Hybrid",
   mode: "heat",
   heatFrom: "from", // the heatmap starts from the departure or from the arrival
   field: null,
   fieldKey: null,
-  bands: null,
   trip: null, // { km, coordinates, roads }
   france: null,
   fitted: false,
@@ -158,6 +155,18 @@ function addOverlayLayers() {
     });
   }
 
+  map.addSource("reach-roads", { type: "geojson", data: emptyCollection, buffer: 4, tolerance: 0.2 });
+  map.addLayer(
+    {
+      id: "reach-roads",
+      type: "line",
+      source: "reach-roads",
+      layout: { "line-cap": "round", "line-join": "round", visibility: state.mode === "routes" ? "visible" : "none" },
+      paint: { "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1, 10, 1.6, 14, 3.4, 17, 6], "line-color": "#fff" },
+    },
+    "france-mask",
+  );
+
   map.addSource("contours", { type: "geojson", data: emptyCollection });
   map.addLayer({
     id: "contour-halo",
@@ -193,28 +202,31 @@ function addOverlayLayers() {
   for (const layer of labelLayers()) map.addLayer(layer);
 }
 
-/** "Routes" view: one copy of the road layer per distance band, kept to the roads inside that band. */
-function rebuildBandLayers() {
-  for (let k = 0; k < BANDS * 2; k += 1) if (map.getLayer(`band-${k}`)) map.removeLayer(`band-${k}`);
-  if (!state.bands) return;
-  // Outer bands first; inner ones are drawn on top and take over the roads they contain.
-  for (let k = state.bands.length - 1; k >= 0; k -= 1) {
-    map.addLayer(
-      {
-        id: `band-${k}`,
-        type: "line",
-        source: "openmaptiles",
-        "source-layer": "transportation",
-        filter: ["all", ["in", ["get", "class"], ["literal", RIDEABLE]], ["within", state.bands[k].geometry]],
-        layout: { "line-cap": "round", "line-join": "round", visibility: state.mode === "routes" ? "visible" : "none" },
-        paint: {
-          "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.9, 10, 1.4, 14, 3.2, 17, 6],
-          "line-color": "#fff",
-        },
-      },
-      "france-mask",
-    );
-  }
+/** "Routes" view: every rideable road of the loaded tiles, cut into pieces coloured by distance (see roads.js). */
+let roadsTimer = null;
+
+function scheduleRoads(delay = 200) {
+  clearTimeout(roadsTimer);
+  roadsTimer = setTimeout(refreshRoads, delay);
+}
+
+function refreshRoads() {
+  if (!state.ready || state.mode !== "routes" || !state.field) return;
+  const features = map.querySourceFeatures("openmaptiles", {
+    sourceLayer: "transportation",
+    filter: ["in", ["get", "class"], ["literal", RIDEABLE]],
+  });
+  // About 100 colour steps over the whole range: smooth to the eye, few enough pieces to stay fast.
+  map.getSource("reach-roads").setData(reachRoads(features, state.field, state.field.maxKm / 100));
+}
+
+/** Colour by distance for the current speed and scale; pieces beyond the scale are hidden. */
+function roadPaint() {
+  const maxKm = neededKm();
+  return {
+    color: ["interpolate", ["linear"], ["get", "km"], ...PALETTE.flatMap(([t, [r, g, b]]) => [t * maxKm, `rgb(${r}, ${g}, ${b})`])],
+    opacity: ["step", ["get", "km"], 1, maxKm, 0],
+  };
 }
 
 // --- Markers --------------------------------------------------------------------
@@ -245,6 +257,8 @@ let contourLabels = [];
 // --- Computing and drawing --------------------------------------------------------
 
 const neededKm = () => (state.speed * state.maxMinutes) / 60;
+// What is asked of the routing server, which stops at MAX_KM.
+const fetchKm = () => Math.min(neededKm(), MAX_KM);
 const heatSource = () => (state.heatFrom === "to" && state.to ? state.to : state.from);
 let computeController = null;
 let computeTimer = null;
@@ -257,8 +271,8 @@ function scheduleCompute(delay = 0) {
 async function compute() {
   const source = heatSource();
   if (!source) return;
-  const key = `${source.lat.toFixed(5)},${source.lon.toFixed(5)},${state.bike}`;
-  const need = neededKm();
+  const key = `${source.lat.toFixed(5)},${source.lon.toFixed(5)}`;
+  const need = fetchKm();
   const field = state.field;
   // A field computed further than needed still works (it is cropped by the colour scale), as long as
   // it is not so much bigger that the grid becomes coarse.
@@ -269,13 +283,12 @@ async function compute() {
   computeController = controller;
   $("loading").hidden = false;
   try {
-    const bands = await isodistances(source, need, { bike: state.bike, speed: state.speed }, controller.signal);
+    const bands = await isodistances(source, need, { speed: state.speed }, controller.signal);
     if (!bands.length) throw new RoutingError("Aucune route cyclable près de ce point.");
-    state.bands = bands;
     state.field = buildField(source, bands);
     state.fieldKey = key;
     showError(null);
-    rebuildBandLayers();
+    scheduleRoads(0);
     if (!state.fitted) {
       state.fitted = true;
       fitToField(false);
@@ -297,7 +310,15 @@ function showError(message) {
   $("tripError").textContent = message ?? "";
 }
 
-/** Everything that depends on speed, scale or isochrones but needs no new routing. */
+/** Isochrone lines drawn for the current scale: every 15, 30 or 60 minutes depending on its length. */
+function isochrones() {
+  const step = state.maxMinutes <= 60 ? 15 : state.maxMinutes <= 180 ? 30 : 60;
+  const lines = [];
+  for (let minutes = step; minutes <= state.maxMinutes; minutes += step) lines.push(minutes);
+  return lines;
+}
+
+/** Everything that depends on speed or scale but needs no new routing. */
 function redraw() {
   updateLegend();
   updatePanel();
@@ -309,30 +330,35 @@ function redraw() {
     coordinates: fieldCorners(field),
   });
 
-  state.bands?.forEach((band, k) => {
-    if (!map.getLayer(`band-${k}`)) return;
-    const near = k ? state.bands[k - 1].km : 0;
-    const t = minutesFor((near + band.km) / 2) / state.maxMinutes;
-    const [r, g, b] = paletteColor(Math.min(t, 1));
-    map.setPaintProperty(`band-${k}`, "line-color", `rgb(${r}, ${g}, ${b})`);
-    map.setPaintProperty(`band-${k}`, "line-opacity", t <= 1 ? 1 : 0);
-  });
+  const paint = roadPaint();
+  map.setPaintProperty("reach-roads", "line-color", paint.color);
+  map.setPaintProperty("reach-roads", "line-opacity", paint.opacity);
 
   const features = [];
   for (const label of contourLabels) label.remove();
   contourLabels = [];
-  for (const minutes of [...state.isochrones].sort((a, b) => a - b)) {
-    if (minutes > state.maxMinutes) continue;
+  // Labels keep clear of the markers and of each other.
+  const taken = [state.from, state.to].filter(Boolean).flatMap((place) => {
+    const point = map.project([place.lon, place.lat]);
+    // The marker and the name tag drawn above it.
+    return [point, { x: point.x, y: point.y - 32 }];
+  });
+  for (const minutes of isochrones()) {
     const km = (state.speed * minutes) / 60;
     if (km > field.maxKm * 1.001) continue;
-    const { segments, label } = contour(field, km);
+    const { segments, labels } = contour(field, km);
     if (!segments.length) continue;
     features.push({ type: "Feature", properties: { minutes }, geometry: { type: "MultiLineString", coordinates: segments } });
-    if (label) {
+    const spot = labels.find((lngLat) => {
+      const point = map.project(lngLat);
+      return taken.every((other) => Math.abs(point.x - other.x) > 70 || Math.abs(point.y - other.y) > 34);
+    });
+    if (spot) {
+      taken.push(map.project(spot));
       const element = document.createElement("div");
       element.className = "contour-label";
-      element.textContent = `${minutes} min`;
-      contourLabels.push(new maplibregl.Marker({ element, anchor: "center" }).setLngLat(label).addTo(map));
+      element.textContent = minutes < 60 ? `${minutes} min` : formatMinutes(minutes).replace(" 00", "");
+      contourLabels.push(new maplibregl.Marker({ element, anchor: "center" }).setLngLat(spot).addTo(map));
     }
   }
   map.getSource("contours").setData({ type: "FeatureCollection", features });
@@ -346,9 +372,8 @@ function setMode(mode) {
   for (const input of document.querySelectorAll('input[name="mode"]')) input.checked = input.value === state.mode;
   if (state.ready) {
     map.setLayoutProperty("heat", "visibility", state.mode === "heat" ? "visible" : "none");
-    for (let k = 0; k < BANDS; k += 1) {
-      if (map.getLayer(`band-${k}`)) map.setLayoutProperty(`band-${k}`, "visibility", state.mode === "routes" ? "visible" : "none");
-    }
+    map.setLayoutProperty("reach-roads", "visibility", state.mode === "routes" ? "visible" : "none");
+    scheduleRoads(0);
   }
   syncUrl();
 }
@@ -438,7 +463,7 @@ async function fetchTrip() {
   state.trip = null;
   updatePanel();
   try {
-    state.trip = await route(state.from, state.to, { bike: state.bike, speed: state.speed }, controller.signal);
+    state.trip = await route(state.from, state.to, { speed: state.speed }, controller.signal);
     showError(null);
     map.getSource("trip")?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: state.trip.coordinates } });
   } catch (error) {
@@ -495,8 +520,11 @@ function updateReach() {
   const stats = fieldStats(field, { speed: state.speed, maxMinutes: state.maxMinutes, reachMinutes });
   const where = state.heatFrom === "to" && state.to ? "de cette arrivée" : "de ce départ";
   $("reach").textContent = `Environ ${integer.format(stats.reachArea)} km² sont à moins de ${reachMinutes} minutes ${where}, à ${state.speed} km/h${
-    stats.complete ? "." : " (calcul en cours pour la nouvelle échelle)."
+    stats.complete || neededKm() > MAX_KM ? "." : " (calcul en cours pour la nouvelle échelle)."
   }`;
+  if (neededKm() > MAX_KM) {
+    $("reach").textContent += ` La carte s'arrête à ${MAX_KM} km de route, la limite du serveur d'itinéraires.`;
+  }
   const set = (key, value, label) => {
     document.querySelector(`[data-stat="${key}"]`).textContent = value;
     if (label) document.querySelector(`[data-stat-label="${key}"]`).textContent = label;
@@ -529,15 +557,12 @@ function parsePair(value) {
 
 function syncUrl() {
   const params = new URLSearchParams(location.search);
-  for (const key of ["from", "to", "carte", "vitesse", "max", "iso", "velo", "vue"]) params.delete(key);
+  for (const key of ["from", "to", "carte", "vitesse", "max", "vue"]) params.delete(key);
   if (state.from) params.set("from", formatPair(state.from));
   if (state.to) params.set("to", formatPair(state.to));
   if (state.to && state.heatFrom === "to") params.set("carte", "arrivee");
   if (state.speed !== DEFAULT_SPEED) params.set("vitesse", String(state.speed));
   if (state.maxMinutes !== DEFAULT_MAX) params.set("max", String(state.maxMinutes));
-  const iso = [...state.isochrones].sort((a, b) => a - b).join(",");
-  if (iso !== DEFAULT_ISOCHRONES.join(",")) params.set("iso", iso || "0");
-  if (state.bike !== "Hybrid") params.set("velo", state.bike);
   if (state.mode !== "heat") params.set("vue", state.mode);
   const query = params.toString().replaceAll("%2C", ",");
   history.replaceState(null, "", query ? `?${query}` : location.pathname);
@@ -546,21 +571,12 @@ function syncUrl() {
 function restoreFromUrl() {
   const params = new URLSearchParams(location.search);
   const speed = Number(params.get("vitesse"));
-  if (speed >= 8 && speed <= 40) state.speed = Math.round(speed);
+  if (speed >= MIN_SPEED && speed <= MAX_SPEED) state.speed = Math.round(speed);
   const max = Number(params.get("max"));
-  if (max >= 15 && max <= 120) state.maxMinutes = Math.round(max / 5) * 5;
-  if (params.has("iso")) {
-    state.isochrones = params
-      .get("iso")
-      .split(",")
-      .map(Number)
-      .filter((value) => ISOCHRONE_OPTIONS.includes(value));
-  }
-  if (BIKES.includes(params.get("velo"))) state.bike = params.get("velo");
+  if (max >= 15 && max <= 360) state.maxMinutes = Math.round(max / 15) * 15;
   $("speedRange").value = String(state.speed);
   $("maxRange").value = String(state.maxMinutes);
-  for (const input of $("isoToggles").querySelectorAll("input")) input.checked = state.isochrones.includes(Number(input.value));
-  for (const input of $("bikeToggles").querySelectorAll("input")) input.checked = input.value === state.bike;
+  updateSpeedFill();
   setMode(params.get("vue"));
 
   const from = parsePair(params.get("from"));
@@ -639,8 +655,15 @@ document.addEventListener("click", (event) => {
 
 // --- Controls --------------------------------------------------------------------------
 
+/** The big speed slider fills up to its thumb with the accent colour. */
+function updateSpeedFill() {
+  const t = (state.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+  $("speedRange").style.setProperty("--fill", `${Math.round(t * 1000) / 10}%`);
+}
+
 $("speedRange").addEventListener("input", (event) => {
   state.speed = Number(event.target.value);
+  updateSpeedFill();
   redraw();
   scheduleCompute(450);
   syncUrl();
@@ -649,17 +672,6 @@ $("maxRange").addEventListener("input", (event) => {
   state.maxMinutes = Number(event.target.value);
   redraw();
   scheduleCompute(450);
-  syncUrl();
-});
-$("isoToggles").addEventListener("change", () => {
-  state.isochrones = [...$("isoToggles").querySelectorAll("input:checked")].map((input) => Number(input.value));
-  redraw();
-  syncUrl();
-});
-$("bikeToggles").addEventListener("change", (event) => {
-  state.bike = event.target.value;
-  scheduleCompute();
-  if (state.to) fetchTrip();
   syncUrl();
 });
 $("modeToggles").addEventListener("change", (event) => setMode(event.target.value));
@@ -722,6 +734,11 @@ $("fullscreen").addEventListener("click", () => {
 document.addEventListener("fullscreenchange", () => map.resize());
 
 map.on("click", (event) => setTo({ lat: event.lngLat.lat, lon: event.lngLat.lng }));
+// New basemap tiles bring new roads to colour.
+map.on("moveend", () => scheduleRoads());
+map.on("sourcedata", (event) => {
+  if (event.sourceId === "openmaptiles" && event.tile) scheduleRoads(300);
+});
 
 // --- Start ------------------------------------------------------------------------------
 

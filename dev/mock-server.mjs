@@ -98,8 +98,8 @@ createServer((req, res) => {
   if (url.pathname === "/tiles.json") {
     return json(res, 200, { tilejson: "3.0.0", tiles: [`http://localhost:${PORT}/tiles/{z}/{x}/{y}.pbf`], minzoom: 0, maxzoom: 14 });
   }
-  if (url.pathname.startsWith("/tiles/")) {
-    res.writeHead(204, { "access-control-allow-origin": "*" });
+  if (url.pathname.startsWith("/tiles/") || url.pathname.startsWith("/fonts/")) {
+    res.writeHead(200, { "access-control-allow-origin": "*" });
     return res.end();
   }
   json(res, 404, { error: "not found" });

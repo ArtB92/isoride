@@ -44,7 +44,7 @@
         <ol class="steps" aria-label="Mode d'emploi">
           <li><strong>1. Départ</strong> Cherchez une adresse ou glissez le point vert.</li>
           <li><strong>2. Vitesse</strong> Réglez votre allure moyenne, de la balade à la sortie sportive.</li>
-          <li><strong>3. Lecture</strong> Vert = proche, rouge = loin. Cliquez sur la carte pour un itinéraire.</li>
+          <li><strong>3. Lecture</strong> Vert = proche, rouge = loin. Une ligne par heure. Cliquez pour un itinéraire.</li>
         </ol>
       </section>
 
@@ -97,29 +97,16 @@
           </div>
         </div>
 
+        <div class="speed-control">
+          <label class="speed-label" for="speedRange">Vitesse moyenne</label>
+          <input id="speedRange" type="range" min="8" max="45" step="1" value="18" />
+          <output id="speedValue" class="speed-value" for="speedRange">18 km/h</output>
+        </div>
         <div class="controls">
           <div class="control-group">
-            <label class="control-label" for="speedRange">Vitesse</label>
-            <input id="speedRange" type="range" min="8" max="40" step="1" value="18" />
-            <output id="speedValue" for="speedRange">18 km/h</output>
-          </div>
-          <div class="control-group">
             <label class="control-label" for="maxRange">Échelle</label>
-            <input id="maxRange" type="range" min="15" max="120" step="5" value="60" />
-            <output id="maxValue" for="maxRange">60 min</output>
-          </div>
-          <div id="isoToggles" class="control-group">
-            <span class="control-label">Isochrones</span>
-            <label class="pill-toggle"><input type="checkbox" value="15" /> 15 min</label>
-            <label class="pill-toggle"><input type="checkbox" value="30" checked /> 30 min</label>
-            <label class="pill-toggle"><input type="checkbox" value="60" checked /> 60 min</label>
-            <label class="pill-toggle"><input type="checkbox" value="90" /> 90 min</label>
-          </div>
-          <div id="bikeToggles" class="control-group">
-            <span class="control-label">Vélo</span>
-            <label class="pill-toggle"><input type="radio" name="bike" value="Hybrid" checked /> Ville</label>
-            <label class="pill-toggle"><input type="radio" name="bike" value="Road" /> Route</label>
-            <label class="pill-toggle"><input type="radio" name="bike" value="Mountain" /> VTT</label>
+            <input id="maxRange" type="range" min="15" max="360" step="15" value="360" />
+            <output id="maxValue" for="maxRange">6 h 00</output>
           </div>
           <div id="modeToggles" class="control-group">
             <span class="control-label">Affichage</span>
@@ -160,15 +147,21 @@
           <p>
             Celles où un vélo a le droit de circuler dans OpenStreetMap&nbsp;: pistes et bandes cyclables, voies vertes, routes
             et chemins, sans autoroutes ni voies rapides. L'itinéraire préfère les aménagements cyclables quand le détour est
-            raisonnable. Le profil «&nbsp;Route&nbsp;» évite les chemins non revêtus, le profil «&nbsp;VTT&nbsp;» les accepte
-            volontiers.
+            raisonnable, et évite les chemins trop accidentés.
           </p>
         </details>
         <details>
           <summary>Que montre l'affichage «&nbsp;Routes seules&nbsp;» ?</summary>
           <p>
-            Au lieu d'une nappe de couleur, seules les routes et pistes atteignables sont colorées, selon le temps qu'il faut
-            pour les rejoindre. Pratique pour voir par où passer, et où le réseau s'arrête (rivières, voies ferrées, relief).
+            Au lieu d'une nappe de couleur, chaque route et piste atteignable est colorée, mètre par mètre, selon le temps qu'il
+            faut pour la rejoindre. En zoomant, les petites rues et chemins apparaissent à leur tour.
+          </p>
+        </details>
+        <details>
+          <summary>Jusqu'où va la carte ?</summary>
+          <p>
+            Jusqu'à 6&nbsp;heures de selle, dans la limite de 200&nbsp;km de route fixée par le serveur d'itinéraires public.
+            Les grandes distances demandent quelques secondes de calcul.
           </p>
         </details>
         <details>

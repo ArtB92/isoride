@@ -52,11 +52,14 @@ loaded (for example `ghcr.io/valhalla/valhalla-scripted` with the Geofabrik Fran
    request only goes out when the reach grows past what was computed, or shrinks enough to need a finer grid.
 4. The heatmap is painted from the field and drawn as an image layer; isochrone lines are traced from the same field
    with marching squares.
-5. "Routes seules" colours the basemap's road layer inside each band polygon (MapLibre `within` filter) instead of
-   drawing the heatmap.
+5. "Routes seules" reads every rideable road from the basemap tiles on screen, cuts it into short pieces and gives
+   each piece its distance from the field (`src/roads.js`). A data-driven colour expression turns distance into
+   time, so the gradient follows the speed slider without rebuilding the pieces. Zooming in brings in smaller roads
+   and paths, which the tiles only carry from zoom 12 or so.
 
-Limits: the speed is an average over the whole ride (slopes influence the chosen route but not its duration), and in
-"Routes seules" a road crossing a band boundary takes the colour of the outer band.
+The scale goes up to 6 hours and the speed up to 45 km/h. The public routing server caps isodistances at 200 km, so
+beyond that the map stops at 200 km and says so. The speed is an average over the whole ride: slopes influence the
+chosen route but not its duration.
 
 ## Credits
 

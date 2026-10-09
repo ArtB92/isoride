@@ -659,6 +659,87 @@ h1 {
 
 /* --- Controls ----------------------------------------------------------- */
 
+/* Speed is the main setting: it gets its own full-width row with a large slider. */
+.speed-control {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 18px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.speed-label {
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.speed-value {
+  min-width: 118px;
+  color: var(--ink);
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-align: right;
+  white-space: nowrap;
+}
+
+#speedRange {
+  --fill: 27%;
+  flex: 1;
+  width: auto;
+  height: 32px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+#speedRange::-webkit-slider-runnable-track {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--green) var(--fill), var(--surface-alt) var(--fill));
+}
+
+#speedRange::-moz-range-track {
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--green) var(--fill), var(--surface-alt) var(--fill));
+}
+
+#speedRange::-webkit-slider-thumb {
+  width: 28px;
+  height: 28px;
+  margin-top: -9px;
+  border: 4px solid #fff;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 2px 10px rgba(2, 8, 22, 0.5);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+#speedRange::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 4px solid #fff;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 2px 10px rgba(2, 8, 22, 0.5);
+}
+
+#speedRange:focus-visible {
+  outline: none;
+}
+
+#speedRange:focus-visible::-webkit-slider-thumb {
+  outline: 3px solid var(--green-soft);
+  outline-offset: 2px;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -903,6 +984,21 @@ details p {
 
   .control-group.actions {
     margin-left: 0;
+  }
+
+  .speed-control {
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+
+  #speedRange {
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .speed-value {
+    margin-left: auto;
+    font-size: 1.6rem;
   }
 }
 

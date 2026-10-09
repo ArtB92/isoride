@@ -3,7 +3,7 @@
 // network, so a new speed only needs a repaint.
 
 const EARTH_RADIUS = 6378137;
-const GRID_CELLS = 360; // cells along the longest side of the reachable area
+const GRID_CELLS = 512; // cells along the longest side of the reachable area
 
 // From near (green) to far (red), as on tram.camilleroux.com; beyond the scale the colour fades out.
 export const PALETTE = [
@@ -274,7 +274,7 @@ export function paintHeat(field, { speed, maxMinutes, alpha = 0.8 }) {
   return canvas.toDataURL();
 }
 
-/** Marching squares at `threshold` km; returns line segments as [lon, lat] pairs and a label position. */
+/** Marching squares at `threshold` km; returns line segments as [lon, lat] pairs and label positions, north first. */
 export function contour(field, thresholdKm) {
   const { cols, rows, km, bounds, cell } = field;
   const [minX, , , maxY] = bounds;
@@ -288,7 +288,7 @@ export function contour(field, thresholdKm) {
     return [pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t];
   };
   const segments = [];
-  let label = null;
+  const labels = [];
   for (let row = 0; row < rows - 1; row += 1) {
     for (let col = 0; col < cols - 1; col += 1) {
       const corners = [
@@ -306,8 +306,9 @@ export function contour(field, thresholdKm) {
       }
       const add = (a, b) => {
         segments.push([fromMercator(a), fromMercator(b)]);
-        // The label sits on the northernmost point of the line, like on the original map.
-        if (!label) label = fromMercator([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+        // Labels go on the northernmost points of the line, like on the original map; rows are
+        // scanned from the north, so the first segments found are the candidates.
+        if (labels.length < 40) labels.push(fromMercator([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]));
       };
       if (crossings.length === 2) add(crossings[0], crossings[1]);
       else if (crossings.length === 4) {
@@ -316,7 +317,7 @@ export function contour(field, thresholdKm) {
       }
     }
   }
-  return { segments, label };
+  return { segments, labels };
 }
 
 /** Figures for the panel and the stats: reachable areas, farthest point and detour factor. */
@@ -357,4 +358,33 @@ export function fieldStats(field, { speed, maxMinutes, reachMinutes }) {
     // Whether the field covers the whole scale, or was computed for a shorter range.
     complete: field.maxKm >= maxKm * 0.98,
   };
+}
+
+/** Network distance (km) at a point, bilinearly interpolated; NaN where the field has no value. */
+export function sampleKm(field, lon, lat) {
+  const { cols, rows, km, cell, bounds } = field;
+  const [x, y] = toMercator([lon, lat]);
+  const gx = (x - bounds[0]) / cell - 0.5;
+  const gy = (bounds[3] - y) / cell - 0.5;
+  if (gx < 0 || gy < 0 || gx > cols - 1 || gy > rows - 1) return NaN;
+  const c0 = Math.floor(gx);
+  const r0 = Math.floor(gy);
+  const c1 = Math.min(c0 + 1, cols - 1);
+  const r1 = Math.min(r0 + 1, rows - 1);
+  const tx = gx - c0;
+  const ty = gy - r0;
+  let sum = 0;
+  let weight = 0;
+  for (const [r, c, w] of [
+    [r0, c0, (1 - tx) * (1 - ty)],
+    [r0, c1, tx * (1 - ty)],
+    [r1, c0, (1 - tx) * ty],
+    [r1, c1, tx * ty],
+  ]) {
+    const value = km[r * cols + c];
+    if (Number.isNaN(value) || w === 0) continue;
+    sum += value * w;
+    weight += w;
+  }
+  return weight > 0.3 ? sum / weight : NaN;
 }
