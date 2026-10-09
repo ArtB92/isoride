@@ -49,6 +49,11 @@ createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const body = url.searchParams.has("json") ? JSON.parse(url.searchParams.get("json")) : null;
   if (url.pathname === "/isochrone") {
+    // Like an overloaded public server: give up on big requests (MOCK_MAX_KM=0 disables this).
+    const limit = Number(process.env.MOCK_MAX_KM ?? 100);
+    if (limit && body.contours.some((c) => (c.distance ?? 0) > limit)) {
+      return setTimeout(() => json(res, 504, { error: "Gateway Timeout" }), 300);
+    }
     const { lat, lon } = body.locations[0];
     const speed = body.costing_options.bicycle.cycling_speed;
     const features = body.contours.map((c) => {

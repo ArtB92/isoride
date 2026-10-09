@@ -57,8 +57,10 @@ loaded (for example `ghcr.io/valhalla/valhalla-scripted` with the Geofabrik Fran
    time, so the gradient follows the speed slider without rebuilding the pieces. Zooming in brings in smaller roads
    and paths, which the tiles only carry from zoom 12 or so.
 
-The scale goes up to 6 hours and the speed up to 45 km/h. The public routing server caps isodistances at 200 km, so
-beyond that the map stops at 200 km and says so. The speed is an average over the whole ride: slopes influence the
+The scale goes up to 6 hours and the speed up to 45 km/h. The public routing server caps isodistances at 200 km and
+often gives up well before on long rides (timeouts, overload). When a request fails, the app retries at shorter
+ranges (150, 100, 70 km…), shows the largest map it gets and says where it stops. A self-hosted Valhalla removes
+that limit. The speed is an average over the whole ride: slopes influence the
 chosen route but not its duration.
 
 ## Credits

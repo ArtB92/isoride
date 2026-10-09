@@ -41,6 +41,7 @@ const state = {
   trip: null, // { km, coordinates, roads }
   france: null,
   fitted: false,
+  ceiling: null, // { key, km }: smallest range the server failed on from this start
   ready: false, // overlay sources and layers added
 };
 
@@ -268,26 +269,48 @@ function scheduleCompute(delay = 0) {
   computeTimer = setTimeout(compute, delay);
 }
 
+// Shorter ranges tried, in km, when the server cannot compute the requested one.
+const FALLBACK_KM = [150, 100, 70, 45, 30, 20, 12];
+
 async function compute() {
   const source = heatSource();
   if (!source) return;
   const key = `${source.lat.toFixed(5)},${source.lon.toFixed(5)}`;
   const need = fetchKm();
+  // Smallest range already known to fail from this start: no point asking for it again.
+  const ceiling = state.ceiling?.key === key ? state.ceiling.km : Infinity;
+  const ranges = [need, ...FALLBACK_KM.filter((km) => km < need)].filter((km) => km < ceiling);
   const field = state.field;
-  // A field computed further than needed still works (it is cropped by the colour scale), as long as
-  // it is not so much bigger that the grid becomes coarse.
-  if (field && state.fieldKey === key && field.maxKm >= need * 0.98 && field.maxKm <= need * 1.8) return;
+  if (field && state.fieldKey === key) {
+    // A field computed further than needed still works (it is cropped by the colour scale), as long as
+    // it is not so much bigger that the grid becomes coarse. One cut short by the server stays as is
+    // until a range it could still extend to is asked for.
+    if (field.maxKm >= need * 0.98 && field.maxKm <= need * 1.8) return;
+    if (field.maxKm < need && (!ranges.length || ranges[0] <= field.maxKm * 1.02)) return;
+  }
+  if (!ranges.length) return;
 
   computeController?.abort();
   const controller = new AbortController();
   computeController = controller;
   $("loading").hidden = false;
   try {
-    const bands = await isodistances(source, need, { speed: state.speed }, controller.signal);
-    if (!bands.length) throw new RoutingError("Aucune route cyclable près de ce point.");
+    let bands = null;
+    for (const km of ranges) {
+      try {
+        bands = await isodistances(source, km, { speed: state.speed }, controller.signal);
+        break;
+      } catch (error) {
+        if (!(error instanceof RoutingError) || !error.tooFar || km === ranges.at(-1)) throw error;
+        state.ceiling = { key, km };
+        $("loading").lastChild.textContent = `Trop loin pour le serveur, essai à ${formatKm(ranges[ranges.indexOf(km) + 1])}…`;
+      }
+    }
+    if (!bands?.length) throw new RoutingError("Aucune route cyclable près de ce point.");
     state.field = buildField(source, bands);
     state.fieldKey = key;
     showError(null);
+    if (state.field.maxKm < need * 0.98) toast(`Le serveur d'itinéraires gratuit s'arrête à ${formatKm(state.field.maxKm)} de route depuis ce point.`);
     scheduleRoads(0);
     if (!state.fitted) {
       state.fitted = true;
@@ -300,6 +323,7 @@ async function compute() {
     if (computeController === controller) {
       computeController = null;
       $("loading").hidden = true;
+      $("loading").lastChild.textContent = "Calcul des trajets…";
     }
   }
   redraw();
@@ -519,11 +543,13 @@ function updateReach() {
   const reachMinutes = Math.min(REACH_MINUTES, state.maxMinutes);
   const stats = fieldStats(field, { speed: state.speed, maxMinutes: state.maxMinutes, reachMinutes });
   const where = state.heatFrom === "to" && state.to ? "de cette arrivée" : "de ce départ";
+  const computing = !$("loading").hidden;
   $("reach").textContent = `Environ ${integer.format(stats.reachArea)} km² sont à moins de ${reachMinutes} minutes ${where}, à ${state.speed} km/h${
-    stats.complete || neededKm() > MAX_KM ? "." : " (calcul en cours pour la nouvelle échelle)."
+    !stats.complete && computing ? " (calcul en cours pour la nouvelle échelle)." : "."
   }`;
-  if (neededKm() > MAX_KM) {
-    $("reach").textContent += ` La carte s'arrête à ${MAX_KM} km de route, la limite du serveur d'itinéraires.`;
+  if (!stats.complete && !computing) {
+    const minutes = formatMinutes(minutesFor(field.maxKm));
+    $("reach").textContent += ` La carte s'arrête à ${formatKm(field.maxKm)} de route (${minutes} à cette vitesse) : le serveur d'itinéraires gratuit ne calcule pas plus loin.`;
   }
   const set = (key, value, label) => {
     document.querySelector(`[data-stat="${key}"]`).textContent = value;

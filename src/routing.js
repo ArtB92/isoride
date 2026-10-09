@@ -5,10 +5,17 @@ export const VALHALLA_URL = (import.meta.env.VITE_VALHALLA_URL ?? "https://valha
 /** Number of nested isodistance polygons requested; the server allows 4 contours per request. */
 export const BANDS = 8;
 const CONTOURS_PER_REQUEST = 4;
+/** Beyond this, a request is abandoned so the map can retry at a shorter range. */
+const REQUEST_TIMEOUT_MS = 30000;
 /** Longest isodistance the public server accepts (max_distance_contour), in km. */
 export const MAX_KM = 200;
 
 export class RoutingError extends Error {
+  /** True when a shorter range may succeed: timeouts, server overload, distance limits. */
+  get tooFar() {
+    return this.status === 0 || this.status === 429 || this.status >= 500 || [154, 155, 157].includes(this.code);
+  }
+
   constructor(message, { status = 0, code = 0 } = {}) {
     super(message);
     this.status = status;
@@ -19,11 +26,14 @@ export class RoutingError extends Error {
 async function call(action, body, signal) {
   // GET with ?json= keeps it a "simple" CORS request (no preflight).
   const url = `${VALHALLA_URL}/${action}?json=${encodeURIComponent(JSON.stringify(body))}`;
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   let response;
   try {
-    response = await fetch(url, { signal });
+    response = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
   } catch (error) {
-    if (error.name === "AbortError") throw error;
+    if (signal?.aborted) throw error;
+    if (timeout.aborted) throw new RoutingError("Le serveur d'itinéraires met trop de temps à répondre.", { status: 504 });
+    // Gateway errors from an overloaded server often come without CORS headers and surface here.
     throw new RoutingError("Le serveur d'itinéraires ne répond pas.");
   }
   const payload = await response.json().catch(() => null);
@@ -92,7 +102,7 @@ export async function isodistances({ lat, lon }, maxKm, { speed }, signal) {
   } catch (error) {
     // A server built without isodistance support rejects distance contours: fall back to time contours
     // computed at the chosen speed, which give the same picture with Valhalla's own hill and surface model.
-    if (error.name === "AbortError" || error.code === 171 || error.status === 429 || !error.status) throw error;
+    if (error.name === "AbortError" || error.status !== 400 || [154, 155, 157, 170, 171].includes(error.code)) throw error;
     results = await Promise.all(chunks.map((chunk) => request(chunk, "time")));
   }
   return results.flat().sort((a, b) => a.km - b.km);
